@@ -247,14 +247,19 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 					}
 					if err != nil {
 						if req.URL != nil {
-						ctx.Warnf("Illegal URL %s", "https://"+r.Host+req.URL.Path)
+							ctx.Warnf("Illegal URL %s", "https://"+r.Host+req.URL.Path)
 						} else {
 							ctx.Warnf("Illegal URL %s", "https://"+r.Host)
 						}
 						return
 					}
 					removeProxyHeaders(ctx, req)
-					resp, err = ctx.RoundTrip(req)
+					resp, err = func() (*http.Response, error) {
+						// explicitly discard request body to avoid data races in certain RoundTripper implementations
+						// see https://github.com/golang/go/issues/61596#issuecomment-1652345131
+						defer req.Body.Close()
+						return ctx.RoundTrip(req)
+					}()
 					if err != nil {
 						ctx.Warnf("Cannot read TLS response from mitm'd server %v", err)
 						return
