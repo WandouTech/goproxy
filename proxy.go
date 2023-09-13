@@ -2,6 +2,7 @@ package goproxy
 
 import (
 	"bufio"
+	"github.com/wandoutech/xproxy-http/autologin"
 	"io"
 	"log"
 	"net"
@@ -22,16 +23,19 @@ type ProxyHttpServer struct {
 	Verbose         bool
 	Logger          Logger
 	NonproxyHandler http.Handler
+	LoginHandler    http.Handler
+	NormalHandler   http.Handler
+	HealthHandler   http.Handler
 	reqHandlers     []ReqHandler
 	respHandlers    []RespHandler
 	httpsHandlers   []HttpsHandler
 	Tr              *http.Transport
 	// ConnectDial will be used to create TCP connections for CONNECT requests
 	// if nil Tr.Dial will be used
-	ConnectDial func(network string, addr string) (net.Conn, error)
+	ConnectDial        func(network string, addr string) (net.Conn, error)
 	ConnectDialWithReq func(req *http.Request, network string, addr string) (net.Conn, error)
-	CertStore   CertStorage
-	KeepHeader  bool
+	CertStore          CertStorage
+	KeepHeader         bool
 }
 
 var hasPort = regexp.MustCompile(`:\d+$`)
@@ -122,6 +126,11 @@ func (fw flushWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("health")
+	w.Write([]byte("health"))
+}
+
 // Standard net/http function. Shouldn't be used directly, http.Serve will use it.
 func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//r.Header["X-Forwarded-For"] = w.RemoteAddr()
@@ -130,12 +139,23 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	} else {
 		ctx := &ProxyCtx{Req: r, Session: atomic.AddInt64(&proxy.sess, 1), Proxy: proxy}
 
-		var err error
+		//var err error
 		ctx.Logf("Got request %v %v %v %v", r.URL.Path, r.Host, r.Method, r.URL.String())
 		if !r.URL.IsAbs() {
 			proxy.NonproxyHandler.ServeHTTP(w, r)
 			return
 		}
+		//路由
+		if r.URL.Path == "/health" {
+			proxy.HealthHandler.ServeHTTP(w, r)
+			return
+		}
+		if r.URL.Path == "/autologin" {
+			proxy.LoginHandler.ServeHTTP(w, r)
+			return
+		}
+		proxy.NormalHandler.ServeHTTP(w, r)
+
 		r, resp := proxy.filterRequest(r, ctx)
 
 		if resp == nil {
@@ -147,7 +167,7 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			if !proxy.KeepHeader {
 				removeProxyHeaders(ctx, r)
 			}
-			resp, err = ctx.RoundTrip(r)
+			resp, err := ctx.RoundTrip(r)
 			if err != nil {
 				ctx.Error = err
 				resp = proxy.filterResponse(nil, ctx)
@@ -216,7 +236,10 @@ func NewProxyHttpServer() *ProxyHttpServer {
 		NonproxyHandler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, "This is a proxy server. Does not respond to non-proxy requests.", 500)
 		}),
-		Tr: &http.Transport{TLSClientConfig: tlsClientSkipVerify, Proxy: http.ProxyFromEnvironment},
+		NormalHandler: http.HandlerFunc(autologin.ProxyHandle),
+		LoginHandler:  http.HandlerFunc(autologin.AutoLoginHandle),
+		HealthHandler: http.HandlerFunc(healthHandler),
+		Tr:            &http.Transport{TLSClientConfig: tlsClientSkipVerify, Proxy: http.ProxyFromEnvironment},
 	}
 
 	proxy.ConnectDial = dialerFromEnv(&proxy)
